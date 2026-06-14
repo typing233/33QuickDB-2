@@ -10,31 +10,34 @@ export class Collaboration {
     this.heartbeatInterval = null;
     this.reconnectTimeout = null;
     this.cursorPositions = new Map();
+    this.syncSeq = 0;
+    this.lastSyncedClock = {};
   }
 
   connect(roomId) {
+    if (this.channel) this.disconnect();
     this.roomId = roomId;
 
     try {
-      this.channel = new BroadcastChannel(`quickdb_${roomId}`);
+      this.channel = new BroadcastChannel(`quickdb_room_${roomId}`);
       this.channel.onmessage = (event) => this.handleMessage(event.data);
       this.isConnected = true;
 
-      this.announce();
+      this.announceJoin();
       this.startHeartbeat();
       this.flushOfflineQueue();
       this.notifyStatus('online');
 
       return true;
     } catch (e) {
-      console.error('Failed to connect:', e);
+      console.error('Collaboration connect failed:', e);
       return false;
     }
   }
 
   disconnect() {
     if (this.channel) {
-      this.send({ type: 'leave', siteId: this.doc.siteId });
+      this.send({ type: 'peer_leave', siteId: this.doc.siteId, timestamp: Date.now() });
       this.channel.close();
       this.channel = null;
     }
@@ -42,145 +45,288 @@ export class Collaboration {
       clearInterval(this.heartbeatInterval);
       this.heartbeatInterval = null;
     }
+    if (this.reconnectTimeout) {
+      clearTimeout(this.reconnectTimeout);
+      this.reconnectTimeout = null;
+    }
     this.isConnected = false;
     this.peers.clear();
+    this.cursorPositions.clear();
     this.notifyStatus('offline');
+    this.notifyPeerCount();
   }
 
-  announce() {
+  announceJoin() {
+    const state = this.doc.getState();
     this.send({
-      type: 'join',
+      type: 'peer_join',
       siteId: this.doc.siteId,
       timestamp: Date.now(),
-      state: this.doc.getState()
+      clock: state.clock,
+      state: state
     });
   }
 
   startHeartbeat() {
+    if (this.heartbeatInterval) clearInterval(this.heartbeatInterval);
     this.heartbeatInterval = setInterval(() => {
       this.send({
         type: 'heartbeat',
         siteId: this.doc.siteId,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        clock: this.doc.vectorClock.getTimestamp()
       });
 
       const now = Date.now();
+      let changed = false;
       for (const [siteId, peer] of this.peers) {
-        if (now - peer.lastSeen > 10000) {
+        if (now - peer.lastSeen > 12000) {
           this.peers.delete(siteId);
+          this.cursorPositions.delete(siteId);
+          changed = true;
         }
       }
-      this.notifyPeerCount();
+      if (changed) this.notifyPeerCount();
     }, 3000);
   }
 
   handleMessage(msg) {
-    if (msg.siteId === this.doc.siteId) return;
+    if (!msg || msg.siteId === this.doc.siteId) return;
 
     switch (msg.type) {
-      case 'join':
-        this.peers.set(msg.siteId, { lastSeen: Date.now(), siteId: msg.siteId });
-        if (msg.state) {
-          this.mergeRemoteState(msg.state);
-        }
-        this.send({
-          type: 'welcome',
-          siteId: this.doc.siteId,
-          state: this.doc.getState()
-        });
-        this.notifyPeerCount();
+      case 'peer_join':
+        this.handlePeerJoin(msg);
         break;
 
-      case 'welcome':
-        this.peers.set(msg.siteId, { lastSeen: Date.now(), siteId: msg.siteId });
-        if (msg.state) {
-          this.mergeRemoteState(msg.state);
-        }
-        this.notifyPeerCount();
+      case 'peer_welcome':
+        this.handlePeerWelcome(msg);
         break;
 
       case 'heartbeat':
-        this.peers.set(msg.siteId, { lastSeen: Date.now(), siteId: msg.siteId });
+        this.peers.set(msg.siteId, { lastSeen: Date.now(), siteId: msg.siteId, clock: msg.clock });
         break;
 
       case 'ops':
-        this.peers.set(msg.siteId, { lastSeen: Date.now(), siteId: msg.siteId });
-        for (const op of msg.ops) {
-          this.doc.applyRemoteOp(op);
-        }
+        this.handleRemoteOps(msg);
         break;
 
-      case 'cursor':
-        this.cursorPositions.set(msg.siteId, msg.position);
+      case 'cursor_move':
+        this.cursorPositions.set(msg.siteId, { x: msg.x, y: msg.y, name: msg.siteId.slice(5, 10) });
         this.notifyCursors();
         break;
 
-      case 'leave':
+      case 'peer_leave':
         this.peers.delete(msg.siteId);
         this.cursorPositions.delete(msg.siteId);
         this.notifyPeerCount();
         break;
+
+      case 'request_state':
+        this.sendFullState(msg.siteId);
+        break;
     }
   }
 
-  mergeRemoteState(state) {
-    const currentState = this.doc.getState();
-    const currentNodeIds = new Set(currentState.nodes.map(n => n.id));
-    const currentEdgeIds = new Set(currentState.edges.map(e => e.id));
+  handlePeerJoin(msg) {
+    this.peers.set(msg.siteId, { lastSeen: Date.now(), siteId: msg.siteId, clock: msg.clock });
+    this.notifyPeerCount();
 
-    for (const node of state.nodes) {
-      if (!currentNodeIds.has(node.id)) {
-        this.doc.nodes.set(node.id, node);
+    if (msg.state) {
+      this.mergeRemoteState(msg.state);
+    }
+
+    const myState = this.doc.getState();
+    this.send({
+      type: 'peer_welcome',
+      siteId: this.doc.siteId,
+      targetSiteId: msg.siteId,
+      timestamp: Date.now(),
+      clock: myState.clock,
+      state: myState
+    });
+  }
+
+  handlePeerWelcome(msg) {
+    if (msg.targetSiteId && msg.targetSiteId !== this.doc.siteId) return;
+
+    this.peers.set(msg.siteId, { lastSeen: Date.now(), siteId: msg.siteId, clock: msg.clock });
+    this.notifyPeerCount();
+
+    if (msg.state) {
+      this.mergeRemoteState(msg.state);
+    }
+  }
+
+  handleRemoteOps(msg) {
+    this.peers.set(msg.siteId, { lastSeen: Date.now(), siteId: msg.siteId });
+    let anyChanged = false;
+
+    for (const op of msg.ops) {
+      const changed = this.doc.applyRemoteOp(op);
+      if (changed) anyChanged = true;
+    }
+
+    if (anyChanged) {
+      this.notifyRemoteChange(msg.ops);
+    }
+  }
+
+  mergeRemoteState(remoteState) {
+    const localState = this.doc.getState();
+    const localNodeMap = new Map(localState.nodes.map(n => [n.id, n]));
+    const localEdgeMap = new Map(localState.edges.map(e => [e.id, e]));
+    let changed = false;
+
+    for (const node of remoteState.nodes || []) {
+      const local = localNodeMap.get(node.id);
+      if (!local) {
+        this.doc.nodes.set(node.id, JSON.parse(JSON.stringify(node)));
+        changed = true;
+      } else {
+        const localEntry = this.doc.nodes.entries.get(node.id);
+        const remoteTs = remoteState.clock ?
+          Object.values(remoteState.clock).reduce((a, b) => a + b, 0) : 0;
+        const localTs = localEntry ? localEntry.timestamp : 0;
+
+        if (remoteTs > localTs) {
+          const merged = this.mergeNodeFields(local, node);
+          this.doc.nodes.set(node.id, merged);
+          changed = true;
+        } else {
+          const merged = this.mergeNodeFields(node, local);
+          if (JSON.stringify(merged) !== JSON.stringify(local)) {
+            this.doc.nodes.set(node.id, merged);
+            changed = true;
+          }
+        }
       }
     }
-    for (const edge of state.edges) {
-      if (!currentEdgeIds.has(edge.id)) {
-        this.doc.edges.set(edge.id, edge);
+
+    for (const edge of remoteState.edges || []) {
+      const local = localEdgeMap.get(edge.id);
+      if (!local) {
+        this.doc.edges.set(edge.id, JSON.parse(JSON.stringify(edge)));
+        changed = true;
+      } else {
+        const localEntry = this.doc.edges.entries.get(edge.id);
+        const remoteTs = remoteState.clock ?
+          Object.values(remoteState.clock).reduce((a, b) => a + b, 0) : 0;
+        const localTs = localEntry ? localEntry.timestamp : 0;
+
+        if (remoteTs > localTs) {
+          this.doc.edges.set(edge.id, JSON.parse(JSON.stringify(edge)));
+          changed = true;
+        }
       }
     }
-    if (state.clock) {
-      this.doc.vectorClock.merge(state.clock);
+
+    if (remoteState.clock) {
+      this.doc.vectorClock.merge(remoteState.clock);
     }
-    this.doc.notify({ type: 'state_sync' });
+
+    if (changed) {
+      this.doc.notify({ type: 'state_sync', source: 'remote' });
+    }
+  }
+
+  mergeNodeFields(base, incoming) {
+    const merged = { ...base, ...incoming };
+
+    const baseFields = new Map((base.fields || []).map(f => [f.id || f.name, f]));
+    const incomingFields = new Map((incoming.fields || []).map(f => [f.id || f.name, f]));
+
+    const mergedFields = [];
+    const seen = new Set();
+
+    for (const [key, field] of baseFields) {
+      const incomingField = incomingFields.get(key);
+      if (incomingField) {
+        mergedFields.push({ ...field, ...incomingField });
+      } else {
+        mergedFields.push(field);
+      }
+      seen.add(key);
+    }
+
+    for (const [key, field] of incomingFields) {
+      if (!seen.has(key)) {
+        mergedFields.push(field);
+      }
+    }
+
+    merged.fields = mergedFields;
+    return merged;
   }
 
   broadcastOps(ops) {
-    if (this.isConnected && ops.length > 0) {
-      this.send({ type: 'ops', siteId: this.doc.siteId, ops });
+    if (!ops || ops.length === 0) return;
+
+    if (this.isConnected) {
+      this.send({ type: 'ops', siteId: this.doc.siteId, ops, seq: ++this.syncSeq });
     } else {
       this.offlineQueue.push(...ops);
     }
   }
 
   broadcastCursor(position) {
-    if (this.isConnected) {
-      this.send({ type: 'cursor', siteId: this.doc.siteId, position });
-    }
+    if (!this.isConnected) return;
+    this.send({
+      type: 'cursor_move',
+      siteId: this.doc.siteId,
+      x: position.x,
+      y: position.y
+    });
+  }
+
+  sendFullState(targetSiteId) {
+    const state = this.doc.getState();
+    this.send({
+      type: 'peer_welcome',
+      siteId: this.doc.siteId,
+      targetSiteId,
+      timestamp: Date.now(),
+      clock: state.clock,
+      state: state
+    });
   }
 
   flushOfflineQueue() {
     if (this.offlineQueue.length > 0 && this.isConnected) {
-      this.send({ type: 'ops', siteId: this.doc.siteId, ops: this.offlineQueue });
+      this.send({
+        type: 'ops',
+        siteId: this.doc.siteId,
+        ops: this.offlineQueue,
+        seq: ++this.syncSeq
+      });
       this.offlineQueue = [];
     }
   }
 
   send(msg) {
-    if (this.channel) {
-      try {
-        this.channel.postMessage(msg);
-      } catch (e) {
-        this.offlineQueue.push(msg);
-        this.handleDisconnect();
+    if (!this.channel) {
+      if (msg.type === 'ops') {
+        this.offlineQueue.push(...(msg.ops || []));
       }
+      return;
+    }
+    try {
+      this.channel.postMessage(msg);
+    } catch (e) {
+      console.warn('Send failed, queuing for reconnect:', e);
+      if (msg.type === 'ops') {
+        this.offlineQueue.push(...(msg.ops || []));
+      }
+      this.handleDisconnect();
     }
   }
 
   handleDisconnect() {
     this.isConnected = false;
-    this.notifyStatus('offline');
+    this.notifyStatus('syncing');
+
+    if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
     this.reconnectTimeout = setTimeout(() => {
-      if (this.roomId) {
+      if (this.roomId && !this.isConnected) {
         this.connect(this.roomId);
       }
     }, 2000);
@@ -209,7 +355,17 @@ export class Collaboration {
     }
   }
 
+  notifyRemoteChange(ops) {
+    for (const l of this.listeners) {
+      try { l({ type: 'remote_change', ops }); } catch(e) {}
+    }
+  }
+
   getPeerCount() {
     return this.peers.size;
+  }
+
+  isOnline() {
+    return this.isConnected;
   }
 }
