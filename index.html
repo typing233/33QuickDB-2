@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>QuickDB - 协同ER图画板</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header id="toolbar">
+    <div class="toolbar-left">
+      <h1>QuickDB</h1>
+      <div class="toolbar-group">
+        <button id="btn-undo" title="撤销 (Ctrl+Z)">↩ 撤销</button>
+        <button id="btn-redo" title="重做 (Ctrl+Y)">↪ 重做</button>
+      </div>
+      <div class="toolbar-group">
+        <button id="btn-zoom-in" title="放大">+</button>
+        <button id="btn-zoom-out" title="缩小">−</button>
+        <button id="btn-zoom-fit" title="适应画布">⊡</button>
+        <span id="zoom-level">100%</span>
+      </div>
+    </div>
+    <div class="toolbar-center">
+      <div class="collab-status">
+        <span id="collab-indicator" class="indicator offline"></span>
+        <span id="collab-text">离线</span>
+        <span id="peer-count"></span>
+      </div>
+    </div>
+    <div class="toolbar-right">
+      <div class="toolbar-group">
+        <button id="btn-branch" title="版本分支">⑂ 分支</button>
+        <button id="btn-history" title="历史记录">⏱ 历史</button>
+      </div>
+      <div class="toolbar-group">
+        <button id="btn-import" title="导入">📥 导入</button>
+        <button id="btn-export" title="导出">📤 导出</button>
+        <button id="btn-save" title="保存 (Ctrl+S)">💾 保存</button>
+      </div>
+      <button id="btn-connect" title="连接协同">🔗 连接</button>
+    </div>
+  </header>
+
+  <div id="workspace">
+    <aside id="sidebar">
+      <div class="sidebar-section">
+        <h3>组件</h3>
+        <div class="component-palette">
+          <div class="palette-item" draggable="true" data-type="table">
+            <span class="palette-icon">▦</span>
+            <span>数据表</span>
+          </div>
+        </div>
+      </div>
+      <div class="sidebar-section" id="properties-panel" style="display:none">
+        <h3>属性</h3>
+        <div id="properties-content"></div>
+      </div>
+      <div class="sidebar-section" id="constraint-warnings" style="display:none">
+        <h3>⚠ 约束警告</h3>
+        <div id="warnings-content"></div>
+      </div>
+    </aside>
+
+    <main id="canvas-container">
+      <canvas id="main-canvas"></canvas>
+      <div id="node-editor" class="node-editor" style="display:none"></div>
+      <div id="minimap" class="minimap">
+        <canvas id="minimap-canvas"></canvas>
+      </div>
+    </main>
+  </div>
+
+  <!-- 模态框: 版本分支管理 -->
+  <div id="modal-branch" class="modal" style="display:none">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>版本分支管理</h2>
+        <button class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="branch-controls">
+          <button id="btn-new-branch">新建分支</button>
+          <button id="btn-merge-branch">合并分支</button>
+        </div>
+        <div id="branch-list" class="branch-list"></div>
+        <div id="branch-graph" class="branch-graph"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 模态框: 历史记录 -->
+  <div id="modal-history" class="modal" style="display:none">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>操作历史</h2>
+        <button class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="history-list" class="history-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 模态框: 连接 -->
+  <div id="modal-connect" class="modal" style="display:none">
+    <div class="modal-content modal-small">
+      <div class="modal-header">
+        <h2>协同连接</h2>
+        <button class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="connect-form">
+          <label>房间ID:</label>
+          <input type="text" id="input-room-id" placeholder="输入或生成房间ID">
+          <button id="btn-gen-room">生成</button>
+          <button id="btn-join-room">加入</button>
+        </div>
+        <div id="connect-status"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 模态框: 导入冲突裁决 -->
+  <div id="modal-conflict" class="modal" style="display:none">
+    <div class="modal-content modal-large">
+      <div class="modal-header">
+        <h2>模式演化冲突</h2>
+        <button class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="conflict-list" class="conflict-list"></div>
+        <div class="conflict-actions">
+          <button id="btn-resolve-all">应用所有裁决</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 隐藏文件输入 -->
+  <input type="file" id="file-input" accept=".json" style="display:none">
+</div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
