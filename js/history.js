@@ -281,31 +281,55 @@ export class VersionControl {
   }
 
   applyThreeWayMerge(base, current, source) {
-    const currentNodeIds = new Set((current.nodes || []).map(n => n.id));
-    const currentEdgeIds = new Set((current.edges || []).map(e => e.id));
-    const baseNodeIds = new Set((base.nodes || []).map(n => n.id));
-    const baseEdgeIds = new Set((base.edges || []).map(e => e.id));
+    const baseNodes = new Map((base.nodes || []).map(n => [n.id, n]));
+    const currentNodes = new Map((current.nodes || []).map(n => [n.id, n]));
+    const sourceNodes = new Map((source.nodes || []).map(n => [n.id, n]));
+    const baseEdges = new Map((base.edges || []).map(e => [e.id, e]));
+    const currentEdges = new Map((current.edges || []).map(e => [e.id, e]));
+    const sourceEdges = new Map((source.edges || []).map(e => [e.id, e]));
 
-    for (const node of source.nodes || []) {
-      if (!currentNodeIds.has(node.id)) {
-        if (!baseNodeIds.has(node.id)) {
-          this.doc.addNode(JSON.parse(JSON.stringify(node)));
+    for (const [id, sourceNode] of sourceNodes) {
+      if (!currentNodes.has(id)) {
+        if (!baseNodes.has(id)) {
+          this.doc.addNode(JSON.parse(JSON.stringify(sourceNode)));
+        }
+      } else {
+        const baseNode = baseNodes.get(id);
+        const currentNode = currentNodes.get(id);
+        const sourceChanged = baseNode ? JSON.stringify(sourceNode) !== JSON.stringify(baseNode) : true;
+        const currentChanged = baseNode ? JSON.stringify(currentNode) !== JSON.stringify(baseNode) : false;
+
+        if (sourceChanged && !currentChanged) {
+          this.doc.updateNode(id, JSON.parse(JSON.stringify(sourceNode)));
         }
       }
     }
 
-    for (const edge of source.edges || []) {
-      if (!currentEdgeIds.has(edge.id)) {
-        if (!baseEdgeIds.has(edge.id)) {
-          this.doc.addEdge(JSON.parse(JSON.stringify(edge)));
+    for (const [id, sourceEdge] of sourceEdges) {
+      if (!currentEdges.has(id)) {
+        if (!baseEdges.has(id)) {
+          this.doc.addEdge(JSON.parse(JSON.stringify(sourceEdge)));
+        }
+      } else {
+        const baseEdge = baseEdges.get(id);
+        const currentEdge = currentEdges.get(id);
+        const sourceChanged = baseEdge ? JSON.stringify(sourceEdge) !== JSON.stringify(baseEdge) : true;
+        const currentChanged = baseEdge ? JSON.stringify(currentEdge) !== JSON.stringify(baseEdge) : false;
+
+        if (sourceChanged && !currentChanged) {
+          this.doc.updateEdge(id, JSON.parse(JSON.stringify(sourceEdge)));
         }
       }
     }
 
-    const sourceNodeIds = new Set((source.nodes || []).map(n => n.id));
-    for (const nodeId of currentNodeIds) {
-      if (baseNodeIds.has(nodeId) && !sourceNodeIds.has(nodeId)) {
-        this.doc.removeNode(nodeId);
+    for (const [id] of currentNodes) {
+      if (baseNodes.has(id) && !sourceNodes.has(id)) {
+        this.doc.removeNode(id);
+      }
+    }
+    for (const [id] of currentEdges) {
+      if (baseEdges.has(id) && !sourceEdges.has(id)) {
+        this.doc.removeEdge(id);
       }
     }
   }

@@ -68,16 +68,17 @@ export class LWWMap {
 
   set(key, value) {
     const ts = Date.now();
+    const frozen = JSON.parse(JSON.stringify(value));
     if (!this.entries.has(key)) {
-      this.entries.set(key, { value, timestamp: ts, siteId: this.siteId, deleted: false });
+      this.entries.set(key, { value: frozen, timestamp: ts, siteId: this.siteId, deleted: false });
     } else {
       const entry = this.entries.get(key);
-      entry.value = value;
+      entry.value = frozen;
       entry.timestamp = ts;
       entry.siteId = this.siteId;
       entry.deleted = false;
     }
-    return { type: 'map_set', key, value, timestamp: ts, siteId: this.siteId };
+    return { type: 'map_set', key, value: frozen, timestamp: ts, siteId: this.siteId };
   }
 
   delete(key) {
@@ -96,7 +97,7 @@ export class LWWMap {
   get(key) {
     const entry = this.entries.get(key);
     if (!entry || entry.deleted) return undefined;
-    return entry.value;
+    return JSON.parse(JSON.stringify(entry.value));
   }
 
   has(key) {
@@ -165,10 +166,35 @@ export class CRDTDocument {
     if (!existing) return null;
     const clock = this.vectorClock.increment();
     const merged = { ...existing, ...updates };
+
+    const diff = {};
+    for (const key of Object.keys(updates)) {
+      if (key === 'id') continue;
+      if (key === 'fields') {
+        const existingFields = new Map((existing.fields || []).map(f => [f.id || f.name, f]));
+        const updatedFields = updates.fields || [];
+        const changedFields = [];
+        for (const f of updatedFields) {
+          const fkey = f.id || f.name;
+          const ef = existingFields.get(fkey);
+          if (!ef || JSON.stringify(ef) !== JSON.stringify(f)) {
+            changedFields.push(f);
+          }
+        }
+        if (changedFields.length > 0) {
+          diff.fields = changedFields;
+        }
+        continue;
+      }
+      if (JSON.stringify(updates[key]) !== JSON.stringify(existing[key])) {
+        diff[key] = updates[key];
+      }
+    }
+
     const op = {
       type: 'update_node',
       nodeId,
-      updates: JSON.parse(JSON.stringify(updates)),
+      updates: JSON.parse(JSON.stringify(diff)),
       data: JSON.parse(JSON.stringify(merged)),
       clock,
       siteId: this.siteId,
@@ -258,35 +284,41 @@ export class CRDTDocument {
     switch (op.type) {
       case 'add_node':
         if (!this.nodes.has(op.nodeId)) {
-          this.nodes.set(op.nodeId, op.data);
+          const nodeData = JSON.parse(JSON.stringify(op.data));
+          nodeData.name = this.deduplicateName(nodeData.name, op.nodeId);
+          this.nodes.set(op.nodeId, nodeData);
           changed = true;
         }
         break;
       case 'update_node': {
         const existing = this.nodes.get(op.nodeId);
         if (existing) {
-          const entry = this.nodes.entries.get(op.nodeId);
-          if (op.timestamp >= entry.timestamp) {
-            this.nodes.set(op.nodeId, op.data);
+          const merged = this.mergeNodeData(existing, op.data, op.updates);
+          const serializedBefore = JSON.stringify(existing);
+          const serializedAfter = JSON.stringify(merged);
+          if (serializedBefore !== serializedAfter) {
+            this.nodes.set(op.nodeId, merged);
             changed = true;
           }
         } else {
-          this.nodes.set(op.nodeId, op.data);
+          this.nodes.set(op.nodeId, JSON.parse(JSON.stringify(op.data)));
           changed = true;
         }
         break;
       }
       case 'remove_node': {
-        const entry = this.nodes.entries.get(op.nodeId);
-        if (entry && !entry.deleted && op.timestamp >= entry.timestamp) {
-          this.nodes.delete(op.nodeId);
-          changed = true;
+        if (this.nodes.has(op.nodeId)) {
+          const entry = this.nodes.entries.get(op.nodeId);
+          if (entry && !entry.deleted && op.timestamp >= entry.timestamp) {
+            this.nodes.delete(op.nodeId);
+            changed = true;
+          }
         }
         break;
       }
       case 'add_edge':
         if (!this.edges.has(op.edgeId)) {
-          this.edges.set(op.edgeId, op.data);
+          this.edges.set(op.edgeId, JSON.parse(JSON.stringify(op.data)));
           changed = true;
         }
         break;
@@ -295,20 +327,22 @@ export class CRDTDocument {
         if (existing) {
           const entry = this.edges.entries.get(op.edgeId);
           if (op.timestamp >= entry.timestamp) {
-            this.edges.set(op.edgeId, op.data);
+            this.edges.set(op.edgeId, JSON.parse(JSON.stringify(op.data)));
             changed = true;
           }
         } else {
-          this.edges.set(op.edgeId, op.data);
+          this.edges.set(op.edgeId, JSON.parse(JSON.stringify(op.data)));
           changed = true;
         }
         break;
       }
       case 'remove_edge': {
-        const entry = this.edges.entries.get(op.edgeId);
-        if (entry && !entry.deleted && op.timestamp >= entry.timestamp) {
-          this.edges.delete(op.edgeId);
-          changed = true;
+        if (this.edges.has(op.edgeId)) {
+          const entry = this.edges.entries.get(op.edgeId);
+          if (entry && !entry.deleted && op.timestamp >= entry.timestamp) {
+            this.edges.delete(op.edgeId);
+            changed = true;
+          }
         }
         break;
       }
@@ -319,6 +353,94 @@ export class CRDTDocument {
       this.notify(op);
     }
     return changed;
+  }
+
+  mergeNodeData(local, remote, updates) {
+    const merged = { ...local };
+
+    if (updates) {
+      for (const key of Object.keys(updates)) {
+        if (key === 'fields') continue;
+        merged[key] = updates[key];
+      }
+    } else {
+      for (const key of Object.keys(remote)) {
+        if (key === 'fields' || key === 'id') continue;
+        if (key === 'x' || key === 'y' || key === 'width' || key === 'height' || key === 'name') {
+          merged[key] = remote[key];
+        }
+      }
+    }
+
+    const changedFields = updates && updates.fields
+      ? new Map((updates.fields || []).map(f => [f.id || f.name, f]))
+      : null;
+
+    if (changedFields) {
+      const localFields = new Map((local.fields || []).map(f => [f.id || f.name, f]));
+      const mergedFields = [];
+      const seen = new Set();
+
+      for (const [key, localField] of localFields) {
+        const changed = changedFields.get(key);
+        if (changed) {
+          mergedFields.push({ ...localField, ...changed });
+        } else {
+          mergedFields.push(localField);
+        }
+        seen.add(key);
+      }
+
+      for (const [key, field] of changedFields) {
+        if (!seen.has(key)) {
+          mergedFields.push(field);
+        }
+      }
+
+      merged.fields = mergedFields;
+    } else if (remote.fields && !updates) {
+      const localFields = new Map((local.fields || []).map(f => [f.id || f.name, f]));
+      const remoteFields = new Map((remote.fields || []).map(f => [f.id || f.name, f]));
+      const mergedFields = [];
+      const seen = new Set();
+
+      for (const [key, localField] of localFields) {
+        const remoteField = remoteFields.get(key);
+        if (remoteField) {
+          mergedFields.push({ ...localField, ...remoteField });
+        } else {
+          mergedFields.push(localField);
+        }
+        seen.add(key);
+      }
+
+      for (const [key, remoteField] of remoteFields) {
+        if (!seen.has(key)) {
+          mergedFields.push(remoteField);
+        }
+      }
+
+      merged.fields = mergedFields;
+    }
+
+    return merged;
+  }
+
+  deduplicateName(name, excludeId) {
+    const existingNames = new Set();
+    for (const { key, value } of this.nodes.values()) {
+      if (key !== excludeId) {
+        existingNames.add(value.name);
+      }
+    }
+    if (!existingNames.has(name)) return name;
+    let suffix = 1;
+    let candidate = `${name}_${suffix}`;
+    while (existingNames.has(candidate)) {
+      suffix++;
+      candidate = `${name}_${suffix}`;
+    }
+    return candidate;
   }
 
   getPendingOps() {

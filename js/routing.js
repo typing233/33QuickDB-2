@@ -7,12 +7,40 @@ export class OrthogonalRouter {
   route(startPoint, endPoint, startSide, endSide, obstacles) {
     const sp = { x: startPoint.x, y: startPoint.y };
     const ep = { x: endPoint.x, y: endPoint.y };
-    const ext1 = this.extendPoint(sp, startSide, this.padding);
-    const ext2 = this.extendPoint(ep, endSide, this.padding);
+
+    let ext1 = this.extendPoint(sp, startSide, this.padding);
+    let ext2 = this.extendPoint(ep, endSide, this.padding);
+
+    ext1 = this.pushOutOfObstacles(ext1, startSide, obstacles);
+    ext2 = this.pushOutOfObstacles(ext2, endSide, obstacles);
 
     const path = this.findPath(ext1, ext2, startSide, endSide, obstacles);
 
     return [sp, ext1, ...path, ext2, ep];
+  }
+
+  pushOutOfObstacles(point, side, obstacles) {
+    let p = { ...point };
+    let iterations = 0;
+    while (iterations < 5) {
+      let inside = false;
+      for (const obs of obstacles) {
+        if (p.x > obs.x && p.x < obs.x + obs.width &&
+            p.y > obs.y && p.y < obs.y + obs.height) {
+          inside = true;
+          switch (side) {
+            case 'left':   p.x = obs.x - this.padding; break;
+            case 'right':  p.x = obs.x + obs.width + this.padding; break;
+            case 'top':    p.y = obs.y - this.padding; break;
+            case 'bottom': p.y = obs.y + obs.height + this.padding; break;
+          }
+          break;
+        }
+      }
+      if (!inside) break;
+      iterations++;
+    }
+    return p;
   }
 
   extendPoint(point, side, distance) {
@@ -276,6 +304,28 @@ export class OrthogonalRouter {
   getBestConnectionSide(sourceRect, targetRect) {
     const sc = { x: sourceRect.x + sourceRect.width / 2, y: sourceRect.y + sourceRect.height / 2 };
     const tc = { x: targetRect.x + targetRect.width / 2, y: targetRect.y + targetRect.height / 2 };
+
+    const overlapX = !(sourceRect.x + sourceRect.width < targetRect.x || targetRect.x + targetRect.width < sourceRect.x);
+    const overlapY = !(sourceRect.y + sourceRect.height < targetRect.y || targetRect.y + targetRect.height < sourceRect.y);
+    const overlapping = overlapX && overlapY;
+
+    if (overlapping) {
+      const dx = tc.x - sc.x;
+      const dy = tc.y - sc.y;
+      if (Math.abs(dx) >= Math.abs(dy)) {
+        if (dx >= 0) {
+          return { startSide: 'top', endSide: 'bottom' };
+        } else {
+          return { startSide: 'bottom', endSide: 'top' };
+        }
+      } else {
+        if (dy >= 0) {
+          return { startSide: 'left', endSide: 'right' };
+        } else {
+          return { startSide: 'right', endSide: 'left' };
+        }
+      }
+    }
 
     const dx = tc.x - sc.x;
     const dy = tc.y - sc.y;

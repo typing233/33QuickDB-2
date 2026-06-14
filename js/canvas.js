@@ -307,7 +307,6 @@ export class CanvasRenderer {
       const endPt = router.getConnectionPoint(targetRect, endSide);
 
       const obstacles = nodes
-        .filter(n => n.id !== edge.sourceId && n.id !== edge.targetId)
         .map(n => ({ x: n.x, y: n.y, width: n.width || 220, height: n.height || 60 }));
 
       const points = router.route(startPt, endPt, startSide, endSide, obstacles);
@@ -484,7 +483,6 @@ export class CanvasRenderer {
       const startPt = router.getConnectionPoint(sourceRect, startSide);
       const endPt = router.getConnectionPoint(targetRect, endSide);
       const obstacles = nodes
-        .filter(n => n.id !== edge.sourceId && n.id !== edge.targetId)
         .map(n => ({ x: n.x, y: n.y, width: n.width || 220, height: n.height || 60 }));
 
       const points = router.route(startPt, endPt, startSide, endSide, obstacles);

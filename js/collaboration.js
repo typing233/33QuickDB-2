@@ -180,24 +180,15 @@ export class Collaboration {
     for (const node of remoteState.nodes || []) {
       const local = localNodeMap.get(node.id);
       if (!local) {
-        this.doc.nodes.set(node.id, JSON.parse(JSON.stringify(node)));
+        const nodeData = JSON.parse(JSON.stringify(node));
+        nodeData.name = this.doc.deduplicateName(nodeData.name, node.id);
+        this.doc.nodes.set(node.id, nodeData);
         changed = true;
       } else {
-        const localEntry = this.doc.nodes.entries.get(node.id);
-        const remoteTs = remoteState.clock ?
-          Object.values(remoteState.clock).reduce((a, b) => a + b, 0) : 0;
-        const localTs = localEntry ? localEntry.timestamp : 0;
-
-        if (remoteTs > localTs) {
-          const merged = this.mergeNodeFields(local, node);
+        const merged = this.mergeNodeFields(local, node);
+        if (JSON.stringify(merged) !== JSON.stringify(local)) {
           this.doc.nodes.set(node.id, merged);
           changed = true;
-        } else {
-          const merged = this.mergeNodeFields(node, local);
-          if (JSON.stringify(merged) !== JSON.stringify(local)) {
-            this.doc.nodes.set(node.id, merged);
-            changed = true;
-          }
         }
       }
     }
